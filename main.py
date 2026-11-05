@@ -1,16 +1,22 @@
-
 import os
 import time
+import json
+import logging
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from openai import AsyncOpenAI
 
+logging.basicConfig(level=logging.INFO)
+
 app = FastAPI()
 
-client = AsyncOpenAI()
+API_KEY = os.getenv("OPENAI_API_KEY")
+ROBOT_TOKEN = os.getenv("ROBOT_TOKEN")
 MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
-ROBOT_TOKEN = os.getenv("ROBOT_TOKEN", "")
+
+client = AsyncOpenAI(api_key=API_KEY) if API_KEY else None
 
 histories = {}
 last_request = {}
@@ -27,15 +33,21 @@ Nếu gặp tình huống nguy hiểm, hãy khuyên người dùng
 tìm sự giúp đỡ từ người lớn đáng tin cậy.
 """
 
+
 def check_token(token):
     if not ROBOT_TOKEN or token != ROBOT_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+
 async def ask_be_na(session_id, message):
+    if not client:
+        raise RuntimeError("Thieu OPENAI_API_KEY")
+
     if not message or len(message) > 600:
         return "Bạn hãy gửi câu ngắn hơn nhé!"
 
     now = time.time()
+
     if now - last_request.get(session_id, 0) < 2:
         return "Bạn chờ Bé Na một chút nhé!"
 
@@ -76,6 +88,7 @@ async def ask_be_na(session_id, message):
     ])
 
     histories[session_id] = history[-12:]
+
     return answer
 
 
@@ -98,10 +111,20 @@ class ChatRequest(BaseModel):
 @app.post("/chat")
 async def chat(data: ChatRequest):
     check_token(data.token)
+
     try:
-        answer = await ask_be_na(data.session_id, data.message)
-        return {"type": "reply", "message": answer}
+        answer = await ask_be_na(
+            data.session_id,
+            data.message
+        )
+
+        return {
+            "type": "reply",
+            "message": answer
+        }
+
     except Exception:
+        logging.exception("LOI KHI GOI AI")
         return JSONResponse(
             status_code=500,
             content={"error": "AI server error"}
@@ -117,6 +140,7 @@ async def websocket_endpoint(websocket: WebSocket):
         return
 
     await websocket.accept()
+
     session_id = str(id(websocket))
 
     try:
@@ -129,22 +153,25 @@ async def websocket_endpoint(websocket: WebSocket):
             raw = await websocket.receive_text()
 
             try:
-                data = __import__("json").loads(raw)
+                data = json.loads(raw)
                 message = data.get("message", "")
             except Exception:
                 message = raw
 
             try:
                 answer = await ask_be_na(session_id, message)
+
                 await websocket.send_json({
                     "type": "reply",
                     "message": answer
                 })
+
             except Exception:
+                logging.exception("LOI AI WEBSOCKET")
                 await websocket.send_json({
                     "type": "error",
                     "message": "Be Na dang gap loi ket noi AI."
                 })
 
     except WebSocketDisconnect:
-        pass
+        logging.info("Robot da ngat ket noi")
