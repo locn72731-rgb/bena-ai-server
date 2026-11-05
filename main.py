@@ -1,3 +1,4 @@
+
 import os
 import time
 import json
@@ -12,36 +13,48 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 
-API_KEY = os.getenv("OPENAI_API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
 ROBOT_TOKEN = os.getenv("ROBOT_TOKEN")
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
-client = AsyncOpenAI(api_key=API_KEY) if API_KEY else None
+MODEL = "openai/gpt-oss-120b:groq"
+
+client = None
+if HF_TOKEN:
+    client = AsyncOpenAI(
+        base_url="https://router.huggingface.co/v1",
+        api_key=HF_TOKEN
+    )
 
 histories = {}
 last_request = {}
 
 INSTRUCTIONS = """
-Bạn là Bé Na, một robot AI có tính cách nữ dịu dàng,
-thân thiện và vui vẻ. Bạn nói tiếng Việt tự nhiên,
-dễ hiểu, câu trả lời ngắn gọn.
-Bạn đang trò chuyện với người dùng tuổi học sinh.
-Luôn giữ nội dung phù hợp lứa tuổi.
+Bạn là Bé Na, robot AI có giọng điệu nữ dịu dàng,
+thân thiện và vui vẻ.
+
+Bạn nói tiếng Việt tự nhiên, dễ hiểu, câu trả lời
+ngắn gọn và phù hợp với học sinh.
+
 Không yêu cầu người dùng tiết lộ mật khẩu,
 địa chỉ nhà, số điện thoại hoặc thông tin riêng tư.
-Nếu gặp tình huống nguy hiểm, hãy khuyên người dùng
-tìm sự giúp đỡ từ người lớn đáng tin cậy.
+
+Không hướng dẫn hành vi nguy hiểm.
+Nếu người dùng gặp tình huống nguy hiểm,
+hãy khuyên tìm sự giúp đỡ từ người lớn đáng tin cậy.
 """
 
 
 def check_token(token):
     if not ROBOT_TOKEN or token != ROBOT_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized"
+        )
 
 
 async def ask_be_na(session_id, message):
     if not client:
-        raise RuntimeError("Thieu OPENAI_API_KEY")
+        raise RuntimeError("Thieu HF_TOKEN tren Render")
 
     if not message or len(message) > 600:
         return "Bạn hãy gửi câu ngắn hơn nhé!"
@@ -53,38 +66,42 @@ async def ask_be_na(session_id, message):
 
     last_request[session_id] = now
 
-    moderation = await client.moderations.create(
-        model="omni-moderation-latest",
-        input=message
-    )
-
-    if moderation.results[0].flagged:
-        return "Mình thử chuyển sang chủ đề an toàn hơn nhé!"
-
     history = histories.setdefault(session_id, [])
 
-    response = await client.responses.create(
+    messages = [
+        {
+            "role": "system",
+            "content": INSTRUCTIONS
+        }
+    ]
+
+    messages.extend(history)
+
+    messages.append({
+        "role": "user",
+        "content": message
+    })
+
+    response = await client.chat.completions.create(
         model=MODEL,
-        instructions=INSTRUCTIONS,
-        input=history + [
-            {"role": "user", "content": message}
-        ],
-        max_output_tokens=180
+        messages=messages,
+        max_tokens=180
     )
 
-    answer = response.output_text or "Bé Na chưa nghĩ ra câu trả lời."
+    answer = response.choices[0].message.content
 
-    output_check = await client.moderations.create(
-        model="omni-moderation-latest",
-        input=answer
-    )
-
-    if output_check.results[0].flagged:
-        answer = "Bé Na chưa thể trả lời câu này. Mình nói chuyện chủ đề khác nhé!"
+    if not answer:
+        answer = "Bé Na chưa nghĩ ra câu trả lời."
 
     history.extend([
-        {"role": "user", "content": message},
-        {"role": "assistant", "content": answer}
+        {
+            "role": "user",
+            "content": message
+        },
+        {
+            "role": "assistant",
+            "content": answer
+        }
     ])
 
     histories[session_id] = history[-12:]
@@ -94,12 +111,17 @@ async def ask_be_na(session_id, message):
 
 @app.get("/")
 async def root():
-    return {"message": "Be Na AI server is ready!"}
+    return {
+        "message": "Be Na Hugging Face server is ready!"
+    }
 
 
 @app.get("/healthz")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "ai": "configured" if client else "missing HF_TOKEN"
+    }
 
 
 class ChatRequest(BaseModel):
@@ -124,10 +146,13 @@ async def chat(data: ChatRequest):
         }
 
     except Exception:
-        logging.exception("LOI KHI GOI AI")
+        logging.exception("LOI HUGGING FACE AI")
+
         return JSONResponse(
             status_code=500,
-            content={"error": "AI server error"}
+            content={
+                "error": "AI server error"
+            }
         )
 
 
@@ -159,7 +184,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 message = raw
 
             try:
-                answer = await ask_be_na(session_id, message)
+                answer = await ask_be_na(
+                    session_id,
+                    message
+                )
 
                 await websocket.send_json({
                     "type": "reply",
@@ -167,10 +195,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 })
 
             except Exception:
-                logging.exception("LOI AI WEBSOCKET")
+                logging.exception("LOI HUGGING FACE WEBSOCKET")
+
                 await websocket.send_json({
                     "type": "error",
-                    "message": "Be Na dang gap loi ket noi AI."
+                    "message": "Be Na dang gap loi AI."
                 })
 
     except WebSocketDisconnect:
