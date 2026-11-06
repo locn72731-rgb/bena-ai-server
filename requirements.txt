@@ -1,6 +1,3 @@
-
 fastapi
-uvicorn
-websockets
-openai
-pydantic
+uvicorn[standard]
+google-genai
