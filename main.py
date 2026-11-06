@@ -1,206 +1,89 @@
-
 import os
-import time
 import json
-import logging
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from openai import AsyncOpenAI
+from google import genai
 
-logging.basicConfig(level=logging.INFO)
+app = FastAPI(title="Be Na AI Server")
 
-app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-HF_TOKEN = os.getenv("HF_TOKEN")
-ROBOT_TOKEN = os.getenv("ROBOT_TOKEN")
+API_KEY = os.getenv("GEMINI_API_KEY")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-MODEL = "openai/gpt-oss-120b:groq"
+client = genai.Client(api_key=API_KEY) if API_KEY else None
 
-client = None
-if HF_TOKEN:
-    client = AsyncOpenAI(
-        base_url="https://router.huggingface.co/v1",
-        api_key=HF_TOKEN
-    )
-
-histories = {}
-last_request = {}
-
-INSTRUCTIONS = """
-Bạn là Bé Na, robot AI có giọng điệu nữ dịu dàng,
-thân thiện và vui vẻ.
-
-Bạn nói tiếng Việt tự nhiên, dễ hiểu, câu trả lời
-ngắn gọn và phù hợp với học sinh.
-
-Không yêu cầu người dùng tiết lộ mật khẩu,
-địa chỉ nhà, số điện thoại hoặc thông tin riêng tư.
-
-Không hướng dẫn hành vi nguy hiểm.
-Nếu người dùng gặp tình huống nguy hiểm,
-hãy khuyên tìm sự giúp đỡ từ người lớn đáng tin cậy.
+SYSTEM_PROMPT = """
+Bạn là Bé Na, một trợ lý AI thân thiện.
+Bạn giao tiếp bằng tiếng Việt, trả lời tự nhiên,
+ngắn gọn, dễ hiểu và hữu ích.
 """
 
-
-def check_token(token):
-    if not ROBOT_TOKEN or token != ROBOT_TOKEN:
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
-
-
-async def ask_be_na(session_id, message):
-    if not client:
-        raise RuntimeError("Thieu HF_TOKEN tren Render")
-
-    if not message or len(message) > 600:
-        return "Bạn hãy gửi câu ngắn hơn nhé!"
-
-    now = time.time()
-
-    if now - last_request.get(session_id, 0) < 2:
-        return "Bạn chờ Bé Na một chút nhé!"
-
-    last_request[session_id] = now
-
-    history = histories.setdefault(session_id, [])
-
-    messages = [
-        {
-            "role": "system",
-            "content": INSTRUCTIONS
-        }
-    ]
-
-    messages.extend(history)
-
-    messages.append({
-        "role": "user",
-        "content": message
-    })
-
-    response = await client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        max_tokens=180
-    )
-
-    answer = response.choices[0].message.content
-
-    if not answer:
-        answer = "Bé Na chưa nghĩ ra câu trả lời."
-
-    history.extend([
-        {
-            "role": "user",
-            "content": message
-        },
-        {
-            "role": "assistant",
-            "content": answer
-        }
-    ])
-
-    histories[session_id] = history[-12:]
-
-    return answer
-
+class ChatRequest(BaseModel):
+    text: str
 
 @app.get("/")
-async def root():
-    return {
-        "message": "Be Na Hugging Face server is ready!"
-    }
+def home():
+    return {"message": "Be Na AI Server is running!"}
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
-@app.get("/healthz")
-async def health():
-    return {
-        "status": "ok",
-        "ai": "configured" if client else "missing HF_TOKEN"
-    }
+def ask_gemini(text: str):
+    if not client:
+        return "Máy chủ chưa được cài đặt Gemini API Key."
 
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=SYSTEM_PROMPT + "\n\nNgười dùng: " + text
+    )
 
-class ChatRequest(BaseModel):
-    session_id: str
-    message: str
-    token: str
-
+    return response.text or "Bé Na chưa có câu trả lời."
 
 @app.post("/chat")
-async def chat(data: ChatRequest):
-    check_token(data.token)
-
-    try:
-        answer = await ask_be_na(
-            data.session_id,
-            data.message
-        )
-
-        return {
-            "type": "reply",
-            "message": answer
-        }
-
-    except Exception:
-        logging.exception("LOI HUGGING FACE AI")
-
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": "AI server error"
-            }
-        )
-
+def chat(request: ChatRequest):
+    return {"reply": ask_gemini(request.text)}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    token = websocket.query_params.get("token", "")
-
-    if not ROBOT_TOKEN or token != ROBOT_TOKEN:
-        await websocket.close(code=1008)
-        return
-
     await websocket.accept()
 
-    session_id = str(id(websocket))
-
     try:
-        await websocket.send_json({
-            "type": "status",
-            "message": "Be Na da ket noi!"
-        })
-
         while True:
-            raw = await websocket.receive_text()
+            message = await websocket.receive_text()
 
             try:
-                data = json.loads(raw)
-                message = data.get("message", "")
-            except Exception:
-                message = raw
-
-            try:
-                answer = await ask_be_na(
-                    session_id,
-                    message
-                )
-
+                data = json.loads(message)
+            except json.JSONDecodeError:
                 await websocket.send_json({
-                    "type": "reply",
-                    "message": answer
+                    "action": "none",
+                    "text": "Tin nhắn không đúng định dạng."
                 })
+                continue
 
-            except Exception:
-                logging.exception("LOI HUGGING FACE WEBSOCKET")
+            if data.get("type") == "chat":
+                user_text = str(data.get("text", "")).strip()
+
+                if not user_text:
+                    reply = "Bạn chưa nhập nội dung."
+                else:
+                    try:
+                        reply = ask_gemini(user_text)
+                    except Exception:
+                        reply = "Bé Na đang gặp lỗi kết nối AI."
 
                 await websocket.send_json({
-                    "type": "error",
-                    "message": "Be Na dang gap loi AI."
+                    "action": "none",
+                    "text": reply
                 })
 
     except WebSocketDisconnect:
-        logging.info("Robot da ngat ket noi")
+        print("Client disconnected")
